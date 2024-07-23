@@ -1,0 +1,63 @@
+# this image can be used to build the real time kernel patch for the jetson xavier
+# Latest JetPack 5.1.3 R35.5.0 is used for this
+FROM ubuntu:focal
+
+# setup image
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt update -qy && apt upgrade -qy && \
+	apt install -qy build-essential software-properties-common
+RUN add-apt-repository -y universe && \
+    add-apt-repository -y multiverse && \
+    apt update -qy && \
+    apt upgrade -qy
+RUN apt install -qy aria2 bc git-core kmod lbzip2 python sudo xxd wget
+
+# Download toolchain for compilation
+RUN aria2c -x 10 https://developer.nvidia.com/embedded/jetson-linux/bootlin-toolchain-gcc-93 \
+    && mkdir toolchain \
+    && tar -xvf aarch64--glibc--stable-final.tar.gz -C toolchain
+
+# Download Jetson drivers
+RUN wget https://developer.nvidia.com/downloads/embedded/l4t/r35_release_v5.0/release/jetson_linux_r35.5.0_aarch64.tbz2 \
+    # this creates a folder called Linux_for_Tegra
+    && tar -xvf jetson_linux_r35.5.0_aarch64.tbz2
+
+# Download Jetson Sample Root Filesystem
+RUN wget https://developer.nvidia.com/downloads/embedded/l4t/r35_release_v5.0/release/tegra_linux_sample-root-filesystem_r35.5.0_aarch64.tbz2 \
+    # we extract sample rootfs to the driver package
+    && tar -xvf tegra_linux_sample-root-filesystem_r35.5.0_aarch64.tbz2 -C Linux_for_Tegra/rootfs/
+
+# Download kernel sources
+WORKDIR /Linux_for_Tegra
+RUN ./source_sync.sh -k tegra-l4t-r35.5.0
+ENV CROSS_COMPILE="/toolchain/bin/aarch64-linux-gnu-"
+ENV KERNEL_SRC_DIR="/Linux_for_Tegra/sources/kernel/kernel-5.10"
+ENV KERNEL_OUT_DIR="/Linux_for_Tegra/kernel"
+ENV ROOTFS_DIR="/Linux_for_Tegra/rootfs"
+
+# Apply PREEMPT_RT patches
+RUN cd ${KERNEL_SRC_DIR}/scripts && ./rt-patch.sh apply-patches && cd -
+
+# Compile kernel and install modules.
+RUN cd ${KERNEL_SRC_DIR} \
+    && mkdir ${KERNEL_SRC_DIR}/build \
+    && make ARCH=arm64 O=${KERNEL_SRC_DIR}/build tegra_defconfig \
+    && make ARCH=arm64 O=${KERNEL_SRC_DIR}/build CROSS_COMPILE=${CROSS_COMPILE} -j8
+RUN cd ${KERNEL_SRC_DIR} \
+    && make ARCH=arm64 O=${KERNEL_SRC_DIR}/build INSTALL_MOD_STRIP=1 CROSS_COMPILE=${CROSS_COMPILE} INSTALL_MOD_PATH=${ROOTFS_DIR} modules_install
+
+ENTRYPOINT ["bash"]
+
+# Generate image for default kernel (w/o realtime patches) first
+#RUN ./apply_binaries.sh
+#RUN FAB=400 BOARDID=2888 FUSELEVEL=fuselevel_production BOARDSKU=0001 BOARDREV=H.0 ./build_l4t_bup.sh jetson-xavier mmcblk0p1
+#RUN cp bootloader/payloads_t19x/bl_update_payload bootloader/payloads_t19x/bl_update_payload_default
+#
+## Copy kernel and modules to final destination.
+#RUN tar -C ${ROOTFS_DIR} -cjf ${KERNEL_OUT_DIR}/kernel_supplements.tbz2 lib/modules \
+# && cp ${KERNEL_SRC_DIR}/build/arch/arm64/boot/Image ${KERNEL_OUT_DIR}
+#
+## Prepare rootfs.
+#RUN ./apply_binaries.sh
+## Generate OTA update image.
+#RUN FAB=400 BOARDID=2888 FUSELEVEL=fuselevel_production BOARDSKU=0001 BOARDREV=H.0 ./build_l4t_bup.sh jetson-xavier mmcblk0p1
